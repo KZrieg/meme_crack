@@ -1,0 +1,8 @@
+<Solution>
+  <Configurations>
+    <BuildType Name="Release" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="server_src/server_src.vcxproj" Id="7be2a105-acd5-41ac-ab15-6f76cd01e564" />
+  <Project Path="src/src.vcxproj" Id="2fb6bc8c-c012-4d8c-800b-a34f339392dd" />
+</Solution>

@@ -1,0 +1,52 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="binary">
+      <UniqueIdentifier>{a1b2c3d4-0001-4d5e-8f90-abcdef000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="core">
+      <UniqueIdentifier>{a1b2c3d4-0002-4d5e-8f90-abcdef000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="utils">
+      <UniqueIdentifier>{66f587ea-57e0-47e5-bafa-d869fc8038c6}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="core\inject.cpp">
+      <Filter>core</Filter>
+    </ClCompile>
+    <ClCompile Include="init.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="core\inject.h">
+      <Filter>core</Filter>
+    </ClInclude>
+    <ClInclude Include="resource.h" />
+    <ClInclude Include="core\imports_fix.h">
+      <Filter>core</Filter>
+    </ClInclude>
+    <ClInclude Include="core\vmp_fix.h">
+      <Filter>core</Filter>
+    </ClInclude>
+    <ClInclude Include="utils\ezpdb.hpp">
+      <Filter>utils</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="binary\deps.bin">
+      <Filter>binary</Filter>
+    </None>
+    <None Include="binary\payload.bin">
+      <Filter>binary</Filter>
+    </None>
+    <None Include="binary\payload_fix.bin">
+      <Filter>binary</Filter>
+    </None>
+    <None Include="binary\server.dll">
+      <Filter>binary</Filter>
+    </None>
+  </ItemGroup>
+</Project>

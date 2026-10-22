@@ -1,0 +1,1 @@
+pe_unmapper.exe /in payload.bin /base 0000666600000000  /out payload_fix.bin
