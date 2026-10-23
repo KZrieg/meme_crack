@@ -53,25 +53,3 @@ Request method
 POST
 Status code
 200 OK
-Remote address
-127.0.0.1:26561
-Referrer policy
-strict-origin-when-cross-origin
-access-control-allow-origin
-https://memesense.gg
-alt-svc
-h3=":26561"; ma=86400
-cf-cache-status
-DYNAMIC
-cf-ray
-a4ea461a2a68687a-LAX
-content-length
-87
-content-type
-application/proto
-date
-Thu, 22 Oct 2026 17:38:07 GMT
-nel
-{"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
-report-to
-{"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=uedGAaOAPFQamS4tdOMY7qKgGNLtM2CEX%2BJKhEwoH3Po5iqVAXmFdF%2BN7HVi2MOuLEasWOHplN9JF24UhRVHcup90eedjmyTZjmhKPoYSGee%2FHjRQHDDo8cRF5CnXoRCnNa53w%3D%3D"}]}

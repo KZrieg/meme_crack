@@ -31,6 +31,9 @@
     <ClInclude Include="utils\ezpdb.hpp">
       <Filter>utils</Filter>
     </ClInclude>
+    <ClInclude Include="core\common.h">
+      <Filter>core</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="src.rc" />

@@ -17,6 +17,7 @@
     <None Include="binary\server.dll" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="core\common.h" />
     <ClInclude Include="core\imports_fix.h" />
     <ClInclude Include="core\inject.h" />
     <ClInclude Include="core\vmp_fix.h" />

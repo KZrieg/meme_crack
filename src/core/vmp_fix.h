@@ -3,6 +3,26 @@
 #include <map>
 #include <string>
 
+// ---------------------------------------------------------------------------
+// Origin (dump-host) module bases.
+//
+// These are NOT constants that must hold on every machine. They are only the
+// recorded values from the Win10 22H2 dump that produced payload.bin, kept as
+// the last-resort fallback so a single-host build still behaves exactly as
+// before.
+//
+// At load time the loader derives the real dump bases from the payload itself:
+// every IAT slot in imports_fix.h still holds the *dump-time* resolved address
+// of its export. Comparing that captured value against the same export in the
+// live process gives
+//
+//     delta_module = liveExportAddress - capturedIatValue
+//     dumpBase     = liveModuleBase   - delta_module
+//
+// which is exact and needs no PDB, no fixed OS build, and no assumption about
+// where the dump came from. vmp_fix.cpp implements that derivation; these
+// values are what it falls back to when the payload has no usable IAT (for
+// example when the caller already pre-fixed it with pe_unmapper).
 constexpr uint64_t kDumpNtdllBase = 0x00007FFCF2270000ULL;
 constexpr uint64_t kDumpSdl3Base  = 0x00007FFC2B0E0000ULL;
 
@@ -11,6 +31,10 @@ enum class SlotModule : uint8_t {
     Ntdll
 };
 
+// One .brdata slot. `symbol` is resolved through ntdll's PDB; `delta` is added
+// to the symbol RVA. A slot with `symbol == nullptr` is a plain module-relative
+// pointer: its dump RVA is `captured - <dump base of module>` which the loader
+// recomputes, so SDL3 needs no symbol table.
 struct BrdataSlot {
     uint32_t    rva;
     uint64_t    captured;
@@ -32,6 +56,18 @@ const BrdataSlot g_brdataSlots[] = {
 };
 
 constexpr int kBrdataSlotCount = sizeof(g_brdataSlots) / sizeof(g_brdataSlots[0]);
+
+// Runtime view of one slot after the dump bases are known. `dumpRva` is the
+// section-relative offset of the pointer inside its origin module, derived once
+// per run, so the same payload binary works on hosts whose modules load at
+// different addresses.
+struct BrdataSlotResolved {
+    std::uint64_t dumpRva;      // offset of the target inside its module
+    std::uint32_t width;        // 6 for the last slot (see doc)
+    SlotModule    module;
+    const char*   symbol;       // ntdll only; null for sdl3
+    std::uint32_t delta;
+};
 
 const char* const kDiagSymbols[] = {
     "RtlAddVectoredExceptionHandler",

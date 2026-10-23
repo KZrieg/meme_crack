@@ -8,9 +8,9 @@
 // MS_INTERACTIVE to 0 and everything below is used verbatim -- that removes
 // the need to feed "f" / "l" through a pipe, which never worked reliably.
 //
-// History: the environment-variable route (MEMESENSE_FORCE_TRUE etc.) and the
-// `echo l | src.exe` route both silently failed more than once, so the
-// compile-time defaults are now the primary mechanism.
+// History: the environment-variable route and the `echo l | src.exe` route both
+// silently failed more than once, so the compile-time defaults are now the
+// primary mechanism.
 
 // ---- payload patching ----------------------------------------------------
 #define MS_FIX_IAT           1   // repair the 149-entry import table
@@ -29,10 +29,6 @@
 // not decreasing), so registering them makes every exception unwind through
 // garbage and restore a bogus RIP.
 #define MS_REGISTER_EH       0
-
-// Force DllMain's return value to TRUE. Falsification test only: with the
-// current payload it makes no difference, because DllMain never returns at all.
-#define MS_FORCE_DLLMAIN     0
 
 // ---- diagnostics ----------------------------------------------------------
 #define MS_DIAG_AFTER_ENTRY  1

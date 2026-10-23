@@ -10,9 +10,9 @@
 //     DLL injected into a GUI process has no console of its own
 //   * the two netsh steps that the Python version expected an operator to run
 //     by hand are executed here, hidden, and their exit codes are reported
-//   * a handshake is signalled once the listener is up, and again on the
-//     first probe that passes, so a loader can wait for it instead of
-//     polling the port
+//   * a handshake event is set once the listener is up, so a loader can wait
+//     for it instead of polling the port. The loader owns the event: it creates
+//     and resets it before mapping this DLL, and this module only opens it.
 //
 // Build target: DLL only, entered through DllMain (server_src.vcxproj).
 //
@@ -132,16 +132,12 @@ std::string PeerName(const sockaddr_in& addr) {
     return buf;
 }
 
-void SignalHandshake(const char* peer) {
-    // Only the first successful probe counts as the handshake. Later probes
-    // are ordinary re-checks and must not re-arm the event.
+// Readiness is signalled once the socket is listening. The loader waits on this
+// to know the service was mapped and initialized, not that a probe arrived.
+void SignalHandshake() {
     if (g_handshakeSent.exchange(true)) return;
-
     if (g_handshakeEvent) ::SetEvent(g_handshakeEvent);
-
-    wchar_t widePeer[128]{};
-    ::MultiByteToWideChar(CP_UTF8, 0, peer, -1, widePeer, 128);
-    Log(L"handshake signalled (first passing probe from %ls)", widePeer);
+    Log(L"handshake signalled (listener is up)");
 }
 
 void HandleClient(SOCKET client, sockaddr_in peer) {
@@ -175,9 +171,7 @@ void HandleClient(SOCKET client, sockaddr_in peer) {
         Log(L"%ls", wide);
     }
 
-    if (sent == static_cast<int>(sizeof(kZeroReply))) {
-        SignalHandshake(name.c_str());
-    }
+    (void)sent;
 
     // Drain until the peer closes or the receive deadline expires, so the
     // client never sees a reset while it is still reading.
@@ -223,6 +217,7 @@ bool Serve() {
 
     Log(L"MemeSense local check server ready on 0.0.0.0:%u", kPort);
     if (g_readyEvent) ::SetEvent(g_readyEvent);
+    SignalHandshake();
 
     while (!g_stopRequested.load()) {
         sockaddr_in peer{};
@@ -240,15 +235,35 @@ bool Serve() {
     return true;
 }
 
+// QuickEdit turns any click in the console into a selection that blocks the
+// process while it holds the screen buffer. A server must never be suspended by
+// an accidental click, so the mode is cleared on both input and output handles.
+void DisableQuickEdit() {
+    for (DWORD which : { STD_INPUT_HANDLE, STD_OUTPUT_HANDLE }) {
+        HANDLE h = ::GetStdHandle(which);
+        if (!h || h == INVALID_HANDLE_VALUE) continue;
+
+        DWORD mode = 0;
+        if (!::GetConsoleMode(h, &mode)) continue;
+
+        mode &= ~ENABLE_QUICK_EDIT_MODE;
+        mode |= ENABLE_EXTENDED_FLAGS;   // required for the change to take effect
+        mode &= ~ENABLE_INSERT_MODE;
+        ::SetConsoleMode(h, mode);
+    }
+}
+
 // Attach to the calling console if there is one, otherwise allocate one.
 void EnsureConsole() {
     if (::GetConsoleWindow() != nullptr) {
         ::SetConsoleOutputCP(CP_UTF8);
+        DisableQuickEdit();
         return;
     }
     if (::AllocConsole()) {
         ::SetConsoleOutputCP(CP_UTF8);
         ::SetConsoleTitleW(L"MemeSense Check Server");
+        DisableQuickEdit();
     }
 }
 
@@ -264,8 +279,18 @@ void StartServerThread() {
             return;
         }
 
-        g_readyEvent = ::CreateEventW(nullptr, TRUE, FALSE, kReadyEventName);
-        g_handshakeEvent = ::CreateEventW(nullptr, TRUE, FALSE, kHandshakeEventName);
+        // The loader creates and resets both events before mapping this DLL, so
+        // a signalled handle here always means this run. Open first and only
+        // create as a fallback, when the DLL is loaded by something else.
+        g_readyEvent = ::OpenEventW(EVENT_MODIFY_STATE, FALSE, kReadyEventName);
+        if (!g_readyEvent) {
+            g_readyEvent = ::CreateEventW(nullptr, TRUE, FALSE, kReadyEventName);
+        }
+
+        g_handshakeEvent = ::OpenEventW(EVENT_MODIFY_STATE, FALSE, kHandshakeEventName);
+        if (!g_handshakeEvent) {
+            g_handshakeEvent = ::CreateEventW(nullptr, TRUE, FALSE, kHandshakeEventName);
+        }
 
         PrepareNetwork();
 

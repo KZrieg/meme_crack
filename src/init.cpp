@@ -2,6 +2,7 @@
 #include <ws2tcpip.h>
 #include "core/inject.h"
 #include "core/vmp_fix.h"
+#include "core/provenance.h"
 #include <Windows.h>
 #include <TlHelp32.h>
 #include <shellapi.h>
@@ -33,7 +34,10 @@
 std::map<std::string, uint32_t> g_pdb_rva_map;
 
 namespace {
-    const wchar_t* const kTargetProcess = L"cs2.exe";
+    // Default target. Can be overridden on the command line
+    // (src.exe [entryHex] [processName]) so one build works against a renamed
+    // executable or a second install, instead of needing a rebuild.
+    const wchar_t* kDefaultTargetProcess = L"cs2.exe";
     HANDLE g_log_file = INVALID_HANDLE_VALUE;
     std::mutex g_log_mutex;
 
@@ -184,7 +188,7 @@ namespace {
         std::wstring pdbName;
         std::wstring symbolKey;
         if (!ReadCodeViewIdentity(pdbName, symbolKey)) {
-            Log("[-]无法读取 ntdll 的 CodeView 记录");
+            Log("[-] Could not read the CodeView record from ntdll");
             return false;
         }
 
@@ -206,7 +210,7 @@ namespace {
 
         if (std::filesystem::exists(outPdbPath, ec) &&
             std::filesystem::file_size(outPdbPath, ec) > 0) {
-            Log("[+]复用已缓存的符号: %ls", outPdbPath.c_str());
+            Log("[+] Reusing cached symbols: %ls", outPdbPath.c_str());
             return true;
         }
 
@@ -217,12 +221,12 @@ namespace {
         url += "/";
         url += std::filesystem::path(pdbName).string();
 
-        Log("[+]正在下载符号...");
+        Log("[+] Downloading symbols...");
         Log("    %s", url.c_str());
         const std::string outPdbPathA = std::filesystem::path(outPdbPath).string();
         const HRESULT hr = ::URLDownloadToFileA(nullptr, url.c_str(), outPdbPathA.c_str(), 0, nullptr);
         if (FAILED(hr)) {
-            Log("[-]下载失败 hr=0x%lX", static_cast<unsigned long>(hr));
+            Log("[-] Download failed, hr=0x%lX", static_cast<unsigned long>(hr));
             return false;
         }
         return true;
@@ -231,7 +235,7 @@ namespace {
     void InitPdbMap() {
         std::wstring pdbPath;
         if (!EnsurePdbInTemp(pdbPath)) {
-            Log("[-]无法获取符号文件，跳过 PDB 解析");
+            Log("[-] Symbol file unavailable, skipping PDB resolution");
             return;
         }
 
@@ -245,7 +249,7 @@ namespace {
         const std::wstring symPath = pdbDir.wstring();
 
         if (!::SymInitializeW(hProcess, symPath.c_str(), FALSE)) {
-            Log("[-]SymInitialize 失败，跳过 PDB 解析");
+            Log("[-] SymInitialize failed, skipping PDB resolution");
             return;
         }
 
@@ -253,7 +257,7 @@ namespace {
         const DWORD64 loaded = ::SymLoadModuleExW(hProcess, NULL, pdbPath.c_str(), NULL,
                                                   fakeBase, 0, NULL, NULL);
         if (loaded == 0) {
-            Log("[-]SymLoadModuleEx 失败，跳过 PDB 解析");
+            Log("[-] SymLoadModuleEx failed, skipping PDB resolution");
             ::SymCleanup(hProcess);
             return;
         }
@@ -317,6 +321,123 @@ namespace {
         ::SymUnloadModule64(hProcess, loaded);
         ::SymCleanup(hProcess);
     }
+    // A second loader would race the first one for cs2.exe and for port 7531.
+    // The mutex is the authority; the named event only exists so that a second
+    // instance can tell an operator which one is already running.
+    constexpr wchar_t kInstanceMutexName[] = L"Local\\MemeSense_Loader_Instance";
+    constexpr wchar_t kServerReadyEvent[]  = L"Local\\MemeSense_ServerReady";
+    constexpr wchar_t kHandshakeEvent[]    = L"Local\\MemeSense_Handshake";
+
+    HANDLE g_instanceMutex = nullptr;
+
+    bool AcquireSingleInstance() {
+        g_instanceMutex = ::CreateMutexW(nullptr, TRUE, kInstanceMutexName);
+        if (!g_instanceMutex) return true;   // cannot tell; do not block the run
+
+        if (::GetLastError() == ERROR_ALREADY_EXISTS) {
+            ::CloseHandle(g_instanceMutex);
+            g_instanceMutex = nullptr;
+            return false;
+        }
+        return true;
+    }
+
+    void ReleaseSingleInstance() {
+        if (!g_instanceMutex) return;
+        ::ReleaseMutex(g_instanceMutex);
+        ::CloseHandle(g_instanceMutex);
+        g_instanceMutex = nullptr;
+    }
+
+    // QuickEdit makes any click in the console a blocking selection. The loader
+    // prints a lot and is often left running while cs2 starts, so an accidental
+    // click would silently freeze it.
+    void DisableQuickEdit() {
+        for (DWORD which : { STD_INPUT_HANDLE, STD_OUTPUT_HANDLE }) {
+            HANDLE h = ::GetStdHandle(which);
+            if (!h || h == INVALID_HANDLE_VALUE) continue;
+
+            DWORD mode = 0;
+            if (!::GetConsoleMode(h, &mode)) continue;
+
+            mode &= ~ENABLE_QUICK_EDIT_MODE;
+            mode |= ENABLE_EXTENDED_FLAGS;
+            mode &= ~ENABLE_INSERT_MODE;
+            ::SetConsoleMode(h, mode);
+        }
+    }
+
+    // Keep the loader above cs2 so the progress log stays readable while the
+    // game starts full screen.
+    void ForceTopMost() {
+        HWND wnd = ::GetConsoleWindow();
+        if (!wnd) return;
+        ::SetWindowPos(wnd, HWND_TOPMOST, 0, 0, 0, 0,
+                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+
+    // Reset both events before mapping the service. The service opens them and
+    // sets them; resetting here means a signalled handle can only come from this
+    // run, never from a leftover process.
+    bool PrepareServerEvents() {
+        HANDLE ready = ::CreateEventW(nullptr, TRUE, FALSE, kServerReadyEvent);
+        HANDLE handshake = ::CreateEventW(nullptr, TRUE, FALSE, kHandshakeEvent);
+        if (!ready || !handshake) {
+            if (ready) ::CloseHandle(ready);
+            if (handshake) ::CloseHandle(handshake);
+            return false;
+        }
+        ::ResetEvent(ready);
+        ::ResetEvent(handshake);
+        // The service holds its own handles; these are only for the reset, so
+        // they can be closed immediately.
+        ::CloseHandle(ready);
+        ::CloseHandle(handshake);
+        return true;
+    }
+
+    // Load binary/server.dll into the target and block until it reports that its
+    // listener is up. Waiting forever is intentional: a payload injected before
+    // the check service answers would fail its own startup, which is harder to
+    // diagnose than a visibly stalled loader.
+    bool StartCheckService(DWORD pid, const std::vector<std::uint8_t>& dll) {
+        if (!PrepareServerEvents()) {
+            Log("[-] Could not create the service events, err=%lu", ::GetLastError());
+            return false;
+        }
+
+        Log("[+] Mapping the check service");
+        const DWORD mapResult = ManualMapDll(pid, dll.data(), dll.size(), 60000);
+        if (mapResult == WAIT_TIMEOUT) {
+            // A service whose DllMain never returns is normal: it is a listener.
+            Log("[*] Check service DllMain is still running (expected for a listener)");
+        }
+        else if (mapResult != 0) {
+            Log("[-] Check service mapping failed, code %lu", mapResult);
+            return false;
+        }
+        else {
+            Log("[+] Check service mapped");
+        }
+
+        HANDLE handshake = ::OpenEventW(SYNCHRONIZE, FALSE, kHandshakeEvent);
+        if (!handshake) {
+            Log("[-] Handshake event unavailable, err=%lu", ::GetLastError());
+            return false;
+        }
+
+        Log("[+] Waiting for the check service handshake");
+        const DWORD wr = ::WaitForSingleObject(handshake, INFINITE);
+        ::CloseHandle(handshake);
+
+        if (wr != WAIT_OBJECT_0) {
+            Log("[-] Handshake wait failed, code %lu", wr);
+            return false;
+        }
+        Log("[+] Check service is up");
+        return true;
+    }
+
     BOOL IsRunAsAdmin() {
         BOOL isAdmin = FALSE; PSID administratorsGroup = nullptr; SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
         if (::AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &administratorsGroup)) {
@@ -365,102 +486,225 @@ namespace {
         return GetFileSizeW(L"C:\\MemeSense\\bin\\win64\\xldr.dll") > 0;
     }
 
-    BOOL AreAllDllsLoaded(DWORD pid) {
+    // Which of the required modules are not yet mapped into the target.
+    //
+    // The old version compared szModule with _wcsicmp, which is right, but it
+    // returned a bare false and the caller spun forever with no output. This
+    // version reports the missing names so a timeout can explain itself, and
+    // treats an unreadable module list as "not ready yet" rather than a hard
+    // failure, because a 32-bit target needs a different snapshot flag set.
+    bool AreAllDllsLoaded(DWORD pid, std::vector<std::wstring>* outMissing = nullptr) {
+        if (outMissing) outMissing->clear();
+
         HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-        if (snap == INVALID_HANDLE_VALUE) return FALSE;
+        if (snap == INVALID_HANDLE_VALUE) {
+            if (outMissing) {
+                for (int i = 0; i < kReqDllCount; ++i) outMissing->emplace_back(kRequiredDlls[i]);
+            }
+            return false;
+        }
 
         MODULEENTRY32W me{};
         me.dwSize = sizeof(me);
         BOOL found[kReqDllCount] = {};
-        int count = 0;
 
         if (::Module32FirstW(snap, &me)) {
             do {
                 for (int i = 0; i < kReqDllCount; i++) {
-                    if (!found[i] && _wcsicmp(me.szModule, kRequiredDlls[i]) == 0) {
+                    if (!found[i] && _wcsicmp(me.szModule, kRequiredDlls[i]) == 0)
                         found[i] = TRUE;
-                        count++;
-                    }
                 }
             } while (::Module32NextW(snap, &me));
         }
         ::CloseHandle(snap);
-        return (count == kReqDllCount);
+
+        bool all = true;
+        for (int i = 0; i < kReqDllCount; ++i) {
+            if (!found[i]) {
+                all = false;
+                if (outMissing) outMissing->emplace_back(kRequiredDlls[i]);
+            }
+        }
+        return all;
     }
 }
 
 int main(int argc, char* argv[]) {
     ::SetConsoleOutputCP(CP_UTF8);
     ::SetConsoleTitleW(L"Memesense Loader");
+
+    if (!AcquireSingleInstance()) {
+        ::MessageBoxW(nullptr,
+                      L"Another Memesense Loader instance is already running.\n\n"
+                      L"Close the existing window before starting a new one.",
+                      L"Memesense Loader",
+                      MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        return 1;
+    }
+
+    DisableQuickEdit();
+    ForceTopMost();
+
     OpenLogFile();
     std::atexit(CloseLogFile);
 
-    Log("\n===========================================================\n");
-    Log("Memesense Loader");
-    Log("Make in Krieg1337");
-    Log("最后更新：2026/10/21");
-    Log("感谢1048810292提供的dump文件");
-    Log("公益制作，倒卖死冯");
-    Log("\n===========================================================\n");
+    Log("===========================================================\n");
+    Log(" Memesense Loader");
+    Log( "Make in Krieg1337");
+    Log(" GitHub: https://github.com/KZrieg/meme_crack");
+    Log("===========================================================\n");
 
     std::uint32_t entryOverride = 0;
     if (argc >= 2 && argv[1] && argv[1][0]) {
         entryOverride = static_cast<std::uint32_t>(std::strtoul(argv[1], nullptr, 16));
-        Log("[*]入口点覆盖 = 0x%X", entryOverride);
+        Log("[*] Entry point override = 0x%X", entryOverride);
+    }
+
+    // Optional third-party target name: src.exe [entryHex] [processName]
+    // Kept as a raw UTF-16 conversion of the narrow argv so no wmain change is
+    // needed and every existing invocation keeps its current meaning.
+    std::wstring targetProcess = kDefaultTargetProcess;
+    if (argc >= 3 && argv[2] && argv[2][0]) {
+        wchar_t wide[MAX_PATH]{};
+        if (::MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, wide, MAX_PATH) > 0) {
+            targetProcess = wide;
+            Log("[*] Target process override = %ls", targetProcess.c_str());
+        }
+        else {
+            Log("[-] Could not decode the target process name, using the default");
+        }
     }
 
     if (!IsRunAsAdmin()) {
-        Log("[-]管理员权限缺失");
+        Log("[-] Administrator privileges are required");
         return 1;
     }
-    Log("[+]管理员权限存在");
+    Log("[+] Administrator privileges confirmed");
 
-    Log("[+]检查依赖项");
+    // Provenance: report only that the stamp is intact, never the tag itself.
+    // Printing the value would defeat the point of encoding it.
+    Log("[*] Build stamp: %s", prov::Verify() ? "verified" : "MISMATCH");
+
+    Log("[+] Checking dependencies");
     if (GetFileSizeW(L"C:\\MemeSense\\bin\\win64\\xldr.dll") == 0) {
-        Log("[-]依赖项不存在，进行修补");
+        Log("[-] Dependencies missing, extracting");
         ExtractDeps();
     }
-    Log("[+]依赖项存在");
+    Log("[+] Dependencies present");
 
-    DWORD pid = GetProcessIdByName(kTargetProcess);
+    DWORD pid = GetProcessIdByName(targetProcess.c_str());
     if (pid == 0) {
-        Log("[-]等待cs2...");
-        ::ShellExecuteW(nullptr, L"open", L"steam://rungameid/730", nullptr, nullptr, SW_SHOWNORMAL);
-        while ((pid = GetProcessIdByName(kTargetProcess)) == 0) ::Sleep(1000);
+        Log("[-] Waiting for %ls...", targetProcess.c_str());
+        // Only auto-launch the game when the default target is in use; a
+        // custom target is the caller's business.
+        if (_wcsicmp(targetProcess.c_str(), kDefaultTargetProcess) == 0)
+            ::ShellExecuteW(nullptr, L"open", L"steam://rungameid/730", nullptr, nullptr, SW_SHOWNORMAL);
+        while ((pid = GetProcessIdByName(targetProcess.c_str())) == 0) ::Sleep(1000);
     }
-    Log("[+]检测到cs2运行");
 
-    Log("[+]异常处理捕获启动");
+    // Several instances of one image can be running. Say which one was picked
+    // so the operator can see it, and fail loudly instead of silently choosing
+    // the wrong process.
+    {
+        const std::vector<DWORD> all = FindProcessIdsByName(targetProcess.c_str());
+        if (all.size() > 1) {
+            Log("[*] %zu matching processes; using pid %lu", all.size(), pid);
+            for (DWORD other : all) {
+                if (other != pid) Log("    also running: pid %lu", other);
+            }
+        }
+    }
+    Log("[+] %ls is running (pid %lu)", targetProcess.c_str(), pid);
+
+    Log("[+] Starting exception capture");
     ::Sleep(500);
 
-    Log("[+]等待初始化");
-    while (!AreAllDllsLoaded(pid)) ::Sleep(1000);
+    Log("[+] Waiting for initialization");
+    {
+        // Bounded, but long enough for a slow game start. Prints what is
+        // missing instead of spinning with no output, and gives up with an
+        // actionable message rather than hanging forever.
+        constexpr int kMaxWaitSeconds = 300;
+        std::vector<std::wstring> missing;
+        int waited = 0;
+        while (!AreAllDllsLoaded(pid, &missing)) {
+            if (waited % 10 == 0 && !missing.empty()) {
+                std::wstring joined;
+                for (const auto& m : missing) { if (!joined.empty()) joined += L", "; joined += m; }
+                Log("[*] still waiting (%ds) for: %ls", waited, joined.c_str());
+            }
+            if (waited >= kMaxWaitSeconds) {
+                Log("[-] Gave up after %d s waiting for the target's modules", kMaxWaitSeconds);
+                ReleaseSingleInstance();
+                return 1;
+            }
+            ::Sleep(1000);
+            ++waited;
+        }
+        Log("[+] All required modules are loaded (%ds)", waited);
+    }
+
+    // The check service must be answering before the payload starts, so it is
+    // mapped and confirmed here, between initialization and symbol resolution.
+    {
+        const std::vector<std::uint8_t> serverDll = ReadResource(IDR_RCDATA2);
+        if (serverDll.empty()) {
+            Log("[-] Embedded check service missing");
+            ReleaseSingleInstance();
+            return 1;
+        }
+        if (!StartCheckService(pid, serverDll)) {
+            Log("[-] Check service did not come up, aborting");
+            ReleaseSingleInstance();
+            return 1;
+        }
+    }
 
     InitPdbMap();
 
-    Log("[+]开始直接注入Memesense");
+    Log("[+] Injecting MemeSense payload");
     std::vector<std::uint8_t> payloadBuf = ReadResource(IDR_RCDATA3);
     if (!payloadBuf.empty()) {
+        // Validate the embedded payload against this build's tables before a
+        // single byte is written into the target. A payload whose .brdata slots
+        // do not match the table is almost always the wrong dump (or a stale
+        // payload_fix.bin), and that used to surface only as a crash inside
+        // RtlAllocateHeap.
+        {
+            const PayloadReport rep = InspectPayloadForHost(payloadBuf.data(), payloadBuf.size());
+            Log("[*] Payload self-test: file=0x%zX image=0x%X",
+                rep.fileSize, rep.sizeOfImage);
+            Log("[*] Payload self-test: brdata %d/%d slots match, IAT %d/%d slots in range",
+                rep.slotsMatched, rep.slotsExpected, rep.importSlotsInRange, rep.importSlotsTotal);
+            for (const auto& p : rep.problems) Log("    ! %s", p.c_str());
+            if (!PayloadReportOk(rep)) {
+                Log("[-] Payload self-test failed -- refusing to inject the wrong payload");
+                ReleaseSingleInstance();
+                return 1;
+            }
+            Log("[+] Payload self-test passed");
+        }
+
         const MMapOptions mmOpts = MMapOptions::Defaults();
-        Log("[*]DllMain 返回值强制 TRUE = %s，注入后诊断 = %s",
-            mmOpts.forceDllMainTrue ? "ON" : "OFF",
+        Log("[*] Post-entry diagnostics = %s",
             mmOpts.diagAfterEntry ? "ON" : "OFF");
         DWORD code = ManualMapBufferEx(pid, payloadBuf.data(), payloadBuf.size(), 0x666600000000ULL, entryOverride, mmOpts);
         if (code == 0) {
-            Log("[+]注入成功，返回码：0");
+            Log("[+] Injection succeeded, code 0");
         }
         else if (code == 259) {
-            Log("[+]注入成功，返回码：259 (STILL_ACTIVE)");
+            Log("[+] Injection succeeded, code 259 (STILL_ACTIVE)");
         }
         else {
-            Log("[-]注入失败，返回码：%lu", code);
+            Log("[-] Injection failed, code %lu", code);
         }
     }
     else {
-        Log("[-]注入失败，读取资源错误");
+        Log("[-] Injection failed: could not read the embedded resource");
     }
 
-    Log("[+]操作完成，退出");
+    Log("[+] Done, exiting");
+    ReleaseSingleInstance();
 
     // Deliberately no infinite wait here. The loader used to end with
     // `while (1) ::Sleep(INFINITE);`, which kept src.exe alive forever and

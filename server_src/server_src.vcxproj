@@ -34,8 +34,8 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(MSBuildThisFileDirectory)..\src\binary\</OutDir>
-    <IntDir>$(MSBuildThisFileDirectory)..\output\server_pdb\</IntDir>
+    <OutDir>$(SolutionDir)src\binary\</OutDir>
+    <IntDir>$(SolutionDir)output\server_pdb\</IntDir>
     <TargetName>server</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -56,7 +56,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <AdditionalDependencies>Ws2_32.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <EntryPointSymbol Condition="'$(ConfigurationType)' == 'DynamicLibrary'"></EntryPointSymbol>
+      <EntryPointSymbol Condition="'$(ConfigurationType)' == 'DynamicLibrary'">
+      </EntryPointSymbol>
     </Link>
     <Manifest>
       <EnableSegmentHeap>true</EnableSegmentHeap>
