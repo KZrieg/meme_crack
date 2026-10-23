@@ -366,7 +366,7 @@ The entry result is **three distinct outcomes**; do not conflate them:
 Target image facts: base `0x666600000000`, `SizeOfImage` `0x309000`, entry RVA `0x1000`.
 
 ---
-##Why did you make this half-finished product public?
+### Why did you make this half-finished product public?
 
 Because when I was using MemeSense normally, MemeSense detected that there was related source code on my computer. Although I don't know how they scan, official support claimed that bans are automated. But this time, when I changed my HWID, the official side banned my account. Before that, I had already run MemeSense multiple times, and there were also MemeSense crack files on my computer.
 <img width="929" height="898" alt="image" src="https://github.com/user-attachments/assets/42c031d7-91a3-4c5f-8fa6-39d5faea0ebf" />
